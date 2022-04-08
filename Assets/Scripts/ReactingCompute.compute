@@ -1,0 +1,232 @@
+// A compute shader needs to have a main function known as a kernel, indicated via:
+//#pragma kernel FunctionKernel // #pragma kernel <name> like #pragma surface <name>
+
+#pragma kernel ReactKernel
+#pragma kernel InitKernel
+
+
+// Macros
+#define PI 3.14159265358979323846
+
+
+// properties
+float _Step;
+float _Dtime;
+float _Etime;
+uint _Resolution;
+float3 _WaterPosition;
+float3 _WaterNormal;
+float3 _GravityNormal;
+float3 _CntnrMovementAcceleration;
+float3 _CntnrRotationVelocity;
+
+
+// a structured memory with read wrrte enabled
+// when allocated memory to it in the cs code, we also determined the kernel (but why?)
+RWStructuredBuffer<float3> _Positions;
+RWStructuredBuffer<float3> _Velocities;
+RWStructuredBuffer<float3> _RelativePositions;
+
+// helper math functions
+
+float3 rotate(float3 axis, float degree, float3 v)
+{
+	if (length(axis) == 0) {
+		return v;
+	}
+	axis = axis / length(axis);
+	float q0 = cos(degree / 2);
+	float q1 = axis.x * sin(degree / 2);
+	float q2 = axis.y * sin(degree / 2);
+	float q3 = axis.z * sin(degree / 2);
+
+	float3x3 rot_mtx = { q0*q0+q1*q1-q2*q2-q3*q3, 2*q1*q2-2*q0*q3, 2*q1*q3+2*q0*q2,
+						   2*q1*q2+2*q0*q3, q0*q0-q1*q1+q2*q2-q3*q3, 2*q2*q3-2*q0*q1,
+						   2*q1*q3-2*q0*q2, 2*q2*q3+2*q0*q1, q0*q0-q1*q1-q2*q2+q3*q3 };
+	v = mul(rot_mtx, v);
+	return v;
+}
+
+float3 rotate_x(float degree, float3 v)
+{
+	float3x3 x_rot_mtx = { 1, 0,           0,
+						   0, cos(degree), -sin(degree),
+						   0, sin(degree),  cos(degree) };
+	v = mul(x_rot_mtx, v);
+	return v;
+}
+
+float3 rotate_y(float degree, float3 v) 
+{
+	float3x3 y_rot_mtx = { cos(degree), 0, -sin(degree),
+						   0,          1,     0,
+						   sin(degree), 0,  cos(degree) };
+	v = mul(y_rot_mtx, v);
+	return v;
+}
+
+float3 rotate_z(float degree, float3 v) {
+
+	float3x3 z_rot_mtx = { cos(degree), -sin(degree), 0,
+						   sin(degree),  cos(degree), 0,
+						   0,           0,          1 };
+	v = mul(z_rot_mtx, v);
+	return v;
+}
+
+
+float2 GetUV(uint3 id) {
+	return (id.xy + 0.5) * _Step - 1.0;
+}
+
+uint GetIndex(uint3 id) {
+	return id.x + id.y * _Resolution;
+}
+
+void SetPosition(uint3 id, float3 position) {
+	//if (id.x < _Resolution && id.y < _Resolution) {
+		_Positions[GetIndex(id)] = position;
+	//}
+}
+// --------------- Graph Functions ----------------------------------------------
+
+void Init(float u, float v, uint3 id){
+
+	//if (id.x < _Resolution && id.y < _Resolution) {
+		_Velocities[GetIndex(id)] = float3 (0, 0, 0);
+		_RelativePositions[GetIndex(id)] = float3 (u, 0, v);
+		_Positions[GetIndex(id)] = float3 (u, 0, v) + _WaterPosition;
+	//}
+}
+
+float3 RestingPos(float u, float v) {
+	float3 p = float3 (u, 0, v);
+	float3 y = float3 (0, 1, 0);
+	float3 normalized_GravityNormal = _GravityNormal / length(_GravityNormal);
+	float3 axis = cross(-normalized_GravityNormal, y);
+	float deg = asin(length(axis));
+	p = rotate(axis, deg, p);
+	return p;
+}
+
+float3 ReactSpring3(float u, float v, uint3 id) {
+	float3 prev_p = _RelativePositions[GetIndex(id)];
+	float3 prev_v = _Velocities[GetIndex(id)];
+
+	// p is the new position relative to water position based on the water normal
+	float3 p = float3 (u, 0, v);
+
+	float3 y = float3 (0, 1, 0);
+	float3 normalized_waterNormal = _WaterNormal / length(_WaterNormal);
+	float3 axis = cross(normalized_waterNormal, y);
+	float deg = asin(length(axis));
+	p = rotate(axis, deg, p);
+
+	float3 spring_displacement_force = (prev_p - RestingPos(u, v));
+	float3 movement_force = 0*(p - prev_p);
+	float3 total_force = spring_displacement_force + movement_force;
+	float3 a = 10 * total_force;// / (_Etime + 1);
+
+	float3 new_v = prev_v + a * _Dtime;
+	float3 new_p = prev_p + prev_v * _Dtime + 1 / 2 * a * _Dtime * _Dtime;
+
+	_Velocities[GetIndex(id)] = new_v;
+	new_v = new_v - 0.01 * new_v; //fraction force
+	_RelativePositions[GetIndex(id)] = new_p;
+	//new_p = prev_p + displacement * (pow(0.7, 1/10*_Dtime) * cos( 1/5 * _Dtime));
+
+	return new_p + _WaterPosition;
+}
+
+float3 ReactSpring2(float u, float v, uint3 id) {
+	float3 prev_p = _RelativePositions[GetIndex(id)];
+	float3 prev_v = _Velocities[GetIndex(id)];
+
+	// p is the new position relative to water position based on the water normal
+	float3 p = float3 (u, 0, v);
+
+	float3 y = float3 (0, 1, 0);
+	float3 normalized_waterNormal = _WaterNormal / length(_WaterNormal);
+	float3 axis = cross(normalized_waterNormal, y);
+	float deg = asin(length(axis));
+	p = rotate(axis, deg, p);
+
+	if (_Etime == 0) {
+		_Velocities[GetIndex(id)] = float3(0, 0, 0);
+		_RelativePositions[GetIndex(id)] = p;
+		return p + _WaterPosition;
+	}
+
+	float3 displacement = RestingPos(u, v) - prev_p;
+	float3 a = 10 * displacement;
+
+	float3 new_v = prev_v + a * _Dtime;
+	//new_v = new_v - 0.001 * new_v; //fraction force
+	float3 new_p = prev_p + prev_v * _Dtime + 1 / 2 * a * _Dtime * _Dtime;
+
+	_Velocities[GetIndex(id)] = new_v;
+	_RelativePositions[GetIndex(id)] = new_p;
+	//new_p = prev_p + displacement * (pow(0.7, 1/10*_Dtime) * cos( 1/5 * _Dtime));
+
+	return new_p + _WaterPosition;
+}
+
+float3 ReactSpring(float u, float v, uint3 id) {
+	float3 prev_p = _RelativePositions[GetIndex(id)];
+	float3 prev_v = _Velocities[GetIndex(id)];
+
+	// p is the new position relative to water position based on the water normal
+	float3 p = float3 ( u, 0, v );
+
+	float3 y = float3 ( 0, 1, 0 );
+	float3 normalized_waterNormal = _WaterNormal / length(_WaterNormal);
+	float3 axis = cross(normalized_waterNormal, y);
+	float deg = asin(length(axis));
+	p = rotate(axis, deg, p);
+
+	float3 displacement = p - prev_p;
+	float3 a = 10 * displacement;
+
+	float3 new_v = prev_v + a * _Dtime;
+	new_v = new_v - 0.001 * new_v; //fraction force
+	float3 new_p = prev_p + prev_v * _Dtime + 1/2*a*_Dtime*_Dtime;
+
+	_Velocities[GetIndex(id)] = new_v;
+	_RelativePositions[GetIndex(id)] = new_p;
+	//new_p = prev_p + displacement * (pow(0.7, 1/10*_Dtime) * cos( 1/5 * _Dtime));
+
+	return new_p + _WaterPosition;
+}
+
+
+float3 SimpleReact(float u, float v, uint3 id) {
+
+	float3 p;
+	p.x = u;
+	p.y = 0;
+	p.z = v;
+
+	float3 y = { 0, 1, 0 };
+	float3 normalized_waterNormal = _WaterNormal / length(_WaterNormal);
+	float3 axis = cross(normalized_waterNormal, y);
+	float deg = asin(length(axis));
+	p = rotate(axis, deg, p);
+
+	return p + _WaterPosition;
+}
+
+[numthreads(1, 1, 1)]
+void ReactKernel(uint3 id: SV_DispatchThreadID)
+{
+	float2 uv = GetUV(id);
+	SetPosition(id, ReactSpring3(uv.x, uv.y, id));
+}
+
+[numthreads(1, 1, 1)]
+void InitKernel(uint3 id: SV_DispatchThreadID)
+{
+	float2 uv = GetUV(id);
+	Init(uv.x, uv.y, id);
+}
+
+

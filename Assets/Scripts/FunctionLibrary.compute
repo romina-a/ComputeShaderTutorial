@@ -1,0 +1,235 @@
+// A compute shader needs to have a main function known as a kernel, indicated via:
+//#pragma kernel FunctionKernel // #pragma kernel <name> like #pragma surface <name>
+
+#pragma kernel WaveKernel
+#pragma kernel WaveToMultiWaveKernel
+#pragma kernel WaveToRippleKernel
+#pragma kernel WaveToSphereKernel
+#pragma kernel WaveToTorusKernel
+
+#pragma kernel MultiWaveToWaveKernel
+#pragma kernel MultiWaveKernel
+#pragma kernel MultiWaveToRippleKernel
+#pragma kernel MultiWaveToSphereKernel
+#pragma kernel MultiWaveToTorusKernel
+
+#pragma kernel RippleToWaveKernel
+#pragma kernel RippleToMultiWaveKernel
+#pragma kernel RippleKernel
+#pragma kernel RippleToSphereKernel
+#pragma kernel RippleToTorusKernel
+
+#pragma kernel SphereToWaveKernel
+#pragma kernel SphereToMultiWaveKernel
+#pragma kernel SphereToRippleKernel
+#pragma kernel SphereKernel
+#pragma kernel SphereToTorusKernel
+
+#pragma kernel TorusToWaveKernel
+#pragma kernel TorusToMultiWaveKernel
+#pragma kernel TorusToRippleKernel
+#pragma kernel TorusToSphereKernel
+#pragma kernel TorusKernel
+
+
+// Macros
+#define PI 3.14159265358979323846
+
+
+// properties
+float _Step, _Time, _TransitionProgress;
+uint _Resolution;
+
+
+// a structured memory with read wirte enabled
+RWStructuredBuffer<float3> _Positions;
+
+
+float2 GetUV (uint3 id) {
+	return (id.xy + 0.5) * _Step - 1.0;
+}
+
+
+void SetPosition (uint3 id, float3 position) {
+	if (id.x < _Resolution && id.y < _Resolution) {
+		_Positions[id.x + id.y * _Resolution] = position;
+	}
+}
+
+// --------------- Graph Functions ----------------------------------------------
+
+float3 Wave(float u, float v, float t) {
+	float3 p;
+	p.x = u;
+	p.y = sin(PI * (u + v + t));
+	p.z = v;
+	return p;
+}
+
+float3 MultiWave(float u, float v, float t) {
+	float3 p;
+	p.x = u;
+	p.y = sin(PI * (u + 0.5 * t));
+	p.y += 0.5 * sin(2.0 * PI * (v + t));
+	p.y += sin(PI * (u + v + 0.25 * t));
+	p.y *= 1.0 / 2.5;
+	p.z = v;
+	return p;
+}
+
+float3 Ripple(float u, float v, float t) {
+	float d = sqrt(u * u + v * v);
+	float3 p;
+	p.x = u;
+	p.y = sin(PI * (4.0 * d - t));
+	p.y /= 1.0 + 10.0 * d;
+	p.z = v;
+	return p;
+}
+
+float3 Sphere(float u, float v, float t) {
+	float r = 0.9 + 0.1 * sin(PI * (6.0 * u + 4.0 * v + t));
+	float s = r * cos(0.5 * PI * v);
+	float3 p;
+	p.x = s * sin(PI * u);
+	p.y = r * sin(0.5 * PI * v);
+	p.z = s * cos(PI * u);
+	return p;
+}
+
+float3 Torus(float u, float v, float t) {
+	float r1 = 0.7 + 0.1 * sin(PI * (6.0 * u + 0.5 * t));
+	float r2 = 0.15 + 0.05 * sin(PI * (8.0 * u + 4.0 * v + 2.0 * t));
+	float s = r2 * cos(PI * v) + r1;
+	float3 p;
+	p.x = s * sin(PI * u);
+	p.y = r2 * sin(PI * v);
+	p.z = s * cos(PI * u);
+	return p;
+}
+
+// --------------- ----- --------- ----------------------------------------------
+
+
+
+
+
+// ----------------------------------------- Kernel Functions Explaination ------------------------------------------
+//  define the kernel function
+// GPU runs the same function on different inputs for groups of inputs, each group calculation can be done in threads, 
+// this attribute determines the number of threads per group, numthreads(1, 1, 1) means one thread per group
+// (64, 1, 1) says 64 threads in one dimension (8, 8, 1) says 64 threads in two dimensions I don't know the difference
+// GPUs have computation units (called wraps or wavefronts) that use a fixed number of threads (64 or 32 are common) 
+// If you use 1 thread per group, the remaining threads will become useless and waste computation power
+// If you use more than the fixed number of threads, more than one wrap will be assigned to each group 
+// (so if you use 64 and 32 threads are in a wrap, thow wraps are used without waste)
+// This explanation is not very accurate. But the conclusion is: Use 64 threads per group 
+// SV_DispatchThreadID:
+// SV_DispatchThreadID is the sum of SV_GroupID * numthreads and GroupThreadID. It varies across the range 
+// specified in Dispatch and numthreads. For example if Dispatch(2,2,2) is called on a compute shader with numthreads(3,3,3) 
+// SV_DispatchThreadID will have a range of 0..5 for each dimension.
+
+//~ ----------------------------------------- #Define Precomplie Directive Explainatoin ------------------------------
+//~ we use this to avoid defining kernel functions for each of the graph functions 
+//~ (we are basically doing that but we just don't copy and paste code instead use define
+//~ we add \ to each line that we want to be defined as Kernel_Function, now where ever we write "Kernel_Function" it will be replaced by all the lines that have "\" 
+//~ if you don't include "\", the word will be replaced by everything that is written after the define <define_word> on the same line (\ makes it multiline)
+//~ compiler puts all the lines with "\" everywhere we use "Kernel_Function" word
+//~ the paranthesis in front of the "Kernel_Function" tells compiler to replace the word "function" with the word that comes after each writing of "Kernel_Function"
+//~ the (...) must be attached to macro name 
+// 
+//~ for the define stuff to work, we have to change the name of our kernel function so we can have multiple kernel functions for each 
+//~ graph function with <function>Kernel name. in order for "function" to be replaced with the define input "function", 
+//~ we need to separate it from "Kernel", we do that by using ## wich is a special character for string concatenation (apparently)
+//~ the whole define stuff (explained with "~") is just to avoid writing many kernel functions for each graph function and 
+//~ honestly you could just copy and paste the code which would be easier to understand
+//~ /!\ DON'T ADD ANY COMMENTS IN BETWEEN THE #define LINES
+
+#define KERNEL_FUNCTION(f) \
+[numthreads(8, 8, 1)] \
+void f##Kernel (uint3 id: SV_DispatchThreadID)\
+{\
+	float2 uv = GetUV(id);\
+	SetPosition(id, f(uv.x, uv.y, _Time));\
+}\
+
+KERNEL_FUNCTION(Wave)
+KERNEL_FUNCTION(MultiWave)
+KERNEL_FUNCTION(Ripple)
+KERNEL_FUNCTION(Sphere)
+KERNEL_FUNCTION(Torus)
+
+
+
+/* ~
+
+// If you don't like to use #define, this is equivalent to that:
+
+[numthreads(8, 8, 1)]
+void WaveKernel(uint3 id: SV_DispatchThreadID)
+{
+	float2 uv = GetUV(id);
+	SetPosition(id, Wave(uv.x, uv.y, _Time));
+}
+[numthreads(8, 8, 1)]
+void MultiWaveKernel(uint3 id: SV_DispatchThreadID)
+{
+	float2 uv = GetUV(id);
+	SetPosition(id, MultiWave(uv.x, uv.y, _Time));
+}
+[numthreads(8, 8, 1)]
+void RippleKernel(uint3 id: SV_DispatchThreadID)
+{
+	float2 uv = GetUV(id);
+	SetPosition(id, Ripple(uv.x, uv.y, _Time));
+}
+[numthreads(8, 8, 1)]
+void SphereKernel(uint3 id: SV_DispatchThreadID)
+{
+	float2 uv = GetUV(id);
+	SetPosition(id, MultiWave(uv.x, uv.y, _Time));
+}
+[numthreads(8, 8, 1)]
+void TorusKernel(uint3 id: SV_DispatchThreadID)
+{
+	float2 uv = GetUV(id);
+	SetPosition(id, Torus(uv.x, uv.y, _Time));
+}
+
+~ */
+
+#define KERNEL_MOPH_FUNCTION(f1, f2) \
+	[numthreads(8, 8, 1)] \
+	void f1##To##f2##Kernel (uint3 id: SV_DispatchThreadID) { \
+		float2 uv = GetUV(id); \
+		float3 position = lerp( \
+			f1(uv.x, uv.y, _Time), f2(uv.x, uv.y, _Time), \
+			_TransitionProgress \
+		); \
+		SetPosition(id, position); \
+	}
+
+KERNEL_MOPH_FUNCTION(Wave, MultiWave);
+KERNEL_MOPH_FUNCTION(Wave, Ripple);
+KERNEL_MOPH_FUNCTION(Wave, Sphere);
+KERNEL_MOPH_FUNCTION(Wave, Torus);
+
+KERNEL_MOPH_FUNCTION(MultiWave, Wave);
+KERNEL_MOPH_FUNCTION(MultiWave, Ripple);
+KERNEL_MOPH_FUNCTION(MultiWave, Sphere);
+KERNEL_MOPH_FUNCTION(MultiWave, Torus);
+
+KERNEL_MOPH_FUNCTION(Ripple, Wave);
+KERNEL_MOPH_FUNCTION(Ripple, MultiWave);
+KERNEL_MOPH_FUNCTION(Ripple, Sphere);
+KERNEL_MOPH_FUNCTION(Ripple, Torus);
+
+KERNEL_MOPH_FUNCTION(Sphere, Wave);
+KERNEL_MOPH_FUNCTION(Sphere, MultiWave);
+KERNEL_MOPH_FUNCTION(Sphere, Ripple);
+KERNEL_MOPH_FUNCTION(Sphere, Torus);
+
+KERNEL_MOPH_FUNCTION(Torus, Wave);
+KERNEL_MOPH_FUNCTION(Torus, MultiWave);
+KERNEL_MOPH_FUNCTION(Torus, Ripple);
+KERNEL_MOPH_FUNCTION(Torus, Sphere);
